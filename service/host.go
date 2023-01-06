@@ -17,16 +17,13 @@ import (
 	"sync"
 	"syscall"
 
-	"github.com/oldjon/gutil/env"
+	grpcresolver "google.golang.org/grpc/resolver"
 
-	etcd "github.com/coreos/etcd/clientv3"
-	"github.com/coreos/etcd/clientv3/concurrency"
-	etcdns "github.com/coreos/etcd/clientv3/namespace"
-	etcdyaml "github.com/coreos/etcd/clientv3/yaml"
 	grpc_middleware "github.com/grpc-ecosystem/go-grpc-middleware"
 	grpc_zap "github.com/grpc-ecosystem/go-grpc-middleware/logging/zap"
+	"github.com/oldjon/gutil/env"
 	"github.com/oldjon/gx/common"
-	"github.com/oldjon/gx/common/naming"
+	"github.com/oldjon/gx/modules/grpc/resolver"
 	"github.com/pkg/errors"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
@@ -34,10 +31,13 @@ import (
 	"github.com/robfig/cron"
 	"github.com/spf13/pflag"
 	"github.com/spf13/viper"
+	etcd "go.etcd.io/etcd/client/v3"
+	"go.etcd.io/etcd/client/v3/concurrency"
+	etcdns "go.etcd.io/etcd/client/v3/namespace"
+	etcdyaml "go.etcd.io/etcd/client/v3/yaml"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"google.golang.org/grpc"
-	grpcnaming "google.golang.org/grpc/naming"
 	"gopkg.in/natefinch/lumberjack.v2"
 )
 
@@ -243,12 +243,14 @@ func (h *host) RegisterModule(moduleName string, addr string, metaData interface
 		return nil
 	}
 
-	resolver := naming.EtcdResolver{Client: h.etcdClient}
-	update := grpcnaming.Update{
+	r := resolver.NewResolver(h.etcdClient)
+
+	gAddr := grpcresolver.Address{
 		Addr:     addr,
 		Metadata: metaData,
 	}
-	err := resolver.Update(context.Background(), moduleName, update, etcd.WithLease(h.EtcdSession().Lease()))
+
+	err := r.Register(context.Background(), moduleName, gAddr, h.EtcdSession().Lease())
 	if err != nil {
 		return errors.WithStack(err)
 	}

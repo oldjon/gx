@@ -5,8 +5,8 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 
-	etcd "github.com/coreos/etcd/clientv3"
 	"github.com/pkg/errors"
+	etcd "go.etcd.io/etcd/client/v3"
 	"go.uber.org/zap"
 )
 

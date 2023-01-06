@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/oldjon/gx/modules/grpc/naming"
+	"github.com/oldjon/gx/modules/grpc/resolver"
 	"google.golang.org/grpc"
 )
 
@@ -30,53 +30,6 @@ func NewConnManager(dialer *Dialer) *ConnManager {
 	}
 }
 
-// Dial dial target and cache connection for future use
-// Deprecated: use DialService instead.
-func (cm *ConnManager) Dial(target string, selector naming.Selector, opts ...grpc.DialOption) (*grpc.ClientConn, error) {
-	return cm.DialContext(context.Background(), target, selector, opts...)
-}
-
-// DialContext dial target within context and cache connection for future use
-// Deprecated: use DialService instead.
-func (cm *ConnManager) DialContext(ctx context.Context, target string, selector naming.Selector, opts ...grpc.DialOption) (*grpc.ClientConn, error) {
-	key := cm.mkKey(target, selector)
-	// speed up result
-	cm.mu.RLock()
-	c, ok := cm.conns[key]
-	if ok {
-		cm.mu.RUnlock()
-		c.mu.RLock()
-		if c.gconn != nil {
-			gconn := c.gconn
-			c.mu.RUnlock()
-			return gconn, nil
-		}
-		c.mu.RUnlock()
-	} else {
-		cm.mu.RUnlock()
-	}
-
-	cm.mu.Lock()
-	c, ok = cm.conns[key]
-	if !ok {
-		c = &conn{}
-		cm.conns[key] = c
-	}
-	cm.mu.Unlock()
-
-	// make sure only one grpc conn is created
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.gconn == nil {
-		gconn, err := cm.dialer.DialContext(ctx, target, selector, opts...)
-		if err != nil {
-			return nil, err
-		}
-		c.gconn = gconn
-	}
-	return c.gconn, nil
-}
-
 func (cm *ConnManager) getOrCreateClientConnect(key string) *conn {
 	// speed up result
 	cm.mu.RLock()
@@ -97,42 +50,37 @@ func (cm *ConnManager) getOrCreateClientConnect(key string) *conn {
 	return c
 }
 
-func (cm *ConnManager) mkKey(target string, selector naming.Selector) string {
+func (cm *ConnManager) mkKey(target string, selector resolver.Selector) string {
 	return fmt.Sprintf("%s-[%#v]", target, selector)
 }
 
 // todo, let ServiceDialerOptions to generate a key
-func serviceKey(serviceName string, dialOptions ServiceDialerOptions) string {
-	key := "v2-" + serviceName
+func serviceKey(serviceName string, selector resolver.Selector) string {
+	return "gx.1-" + serviceName + "-" + fmt.Sprintf("%#v", selector)
+}
 
-	key += "{"
-	for k, v := range dialOptions.Metadata {
-		key += fmt.Sprintf("%s,%s;", k, v)
+// Dial to create a grpc ClientConn by providing fx service path & other filter options
+func (cm *ConnManager) Dial(ctx context.Context, serviceName string, opts ...grpc.DialOption) (*grpc.ClientConn, error) {
+	c := cm.getOrCreateClientConnect(serviceName)
+
+	// make sure only one grpc conn is created
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.gconn == nil {
+		conn, err := cm.dialer.DialService(ctx, serviceName, opts...)
+		if err != nil {
+			return nil, err
+		}
+		c.gconn = conn
 	}
-	key += "}"
-
-	return key
+	return c.gconn, nil
 }
 
-type DialServiceOptions struct {
-	// Name is provided to create global connection, if provide as empty, manager will create Name by itself
-	Name string
-
-	// ServicePath is used to select which service(aka. module) will be selected out
-	//  ServicePath: "/" + hostName + "/" + moduleName
-	ServicePath string
-
-	// ExtraDialOptions is used to target more specific (service) instance
-	ExtraDialOptions ServiceDialerOptions
-
-	GRPCOptions []grpc.DialOption
-}
-
-// DialService to create a grpc ClientConn by providing fx service path & other filter options
-func (cm *ConnManager) DialService(ctx context.Context, opts DialServiceOptions) (*grpc.ClientConn, error) {
-	key := opts.Name
-	if len(opts.Name) == 0 {
-		key = serviceKey(opts.ServicePath, opts.ExtraDialOptions)
+// DialWithSelector to create a grpc ClientConn by providing fx service path & other filter options
+func (cm *ConnManager) DialWithSelector(ctx context.Context, serviceName string, selector resolver.Selector, opts ...grpc.DialOption) (*grpc.ClientConn, error) {
+	key := serviceName
+	if selector != nil {
+		key = serviceKey(serviceName, selector)
 	}
 
 	c := cm.getOrCreateClientConnect(key)
@@ -141,7 +89,7 @@ func (cm *ConnManager) DialService(ctx context.Context, opts DialServiceOptions)
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.gconn == nil {
-		conn, err := cm.dialer.DialService(ctx, opts.ServicePath, opts.ExtraDialOptions, opts.GRPCOptions...)
+		conn, err := cm.dialer.DialWithSelector(ctx, serviceName, selector, opts...)
 		if err != nil {
 			return nil, err
 		}

@@ -1,7 +1,9 @@
-package naming
+package resolver
 
 import (
 	"fmt"
+
+	grpcresolver "google.golang.org/grpc/resolver"
 )
 
 var (
@@ -15,26 +17,20 @@ var (
 	_ Selector = (*constSelector)(nil)
 )
 
-// Address represents a server the bot connects to.
-//
-//   copy from grpc.Address
-//    will be removed without notification
-type Address struct {
-	// Addr is the server address on which a connection will be established.
-	// Deprecated: it is not used in filter logic
-	Addr string
-	// Metadata is the information associated with Addr, which may be used
-	// to make load balancing decision.
-	Metadata interface{}
-}
-
 type Selector interface {
-	Select(Address) (bool, error)
+	Select(grpcresolver.Address) (bool, error)
 }
 
 type MetaSelector struct {
-	FieldName string
-	Target    string
+	MetaData map[string]string
+}
+
+func NewMetaSelector() *MetaSelector {
+	return &MetaSelector{map[string]string{}}
+}
+
+func (ms MetaSelector) WithKV(k, v string) {
+	ms.MetaData[k] = v
 }
 
 // And returns Selector that return true if all ss return true
@@ -63,30 +59,35 @@ func Error(err error) Selector {
 	return constSelector{false, err}
 }
 
-func (ms MetaSelector) Select(addr Address) (bool, error) {
-	metam, ok := addr.Metadata.(map[string]interface{})
+func (ms MetaSelector) Select(addr grpcresolver.Address) (bool, error) {
+	metaData, ok := addr.Metadata.(map[string]interface{})
 	if !ok {
 		return false, errMetaNotMap
 	}
 
-	fieldv, ok := metam[ms.FieldName]
-	if !ok {
-		return false, nil
+	for k, v := range ms.MetaData {
+		fieldValue, ok := metaData[k]
+		if !ok {
+			return false, nil
+		}
+
+		value, ok := fieldValue.(string)
+		if !ok {
+			return false, nil
+		}
+		if value != v {
+			return false, nil
+		}
 	}
 
-	fields, ok := fieldv.(string)
-	if !ok {
-		return false, nil
-	}
-
-	return fields == ms.Target, nil
+	return true, nil
 }
 
 type andSelector struct {
 	selectors []Selector
 }
 
-func (as andSelector) Select(addr Address) (bool, error) {
+func (as andSelector) Select(addr grpcresolver.Address) (bool, error) {
 	for _, s := range as.selectors {
 		ok, err := s.Select(addr)
 		if err != nil {
@@ -105,7 +106,7 @@ type orSelector struct {
 	selectors []Selector
 }
 
-func (os orSelector) Select(addr Address) (bool, error) {
+func (os orSelector) Select(addr grpcresolver.Address) (bool, error) {
 	for _, s := range os.selectors {
 		ok, err := s.Select(addr)
 		if err != nil {
@@ -125,6 +126,6 @@ type constSelector struct {
 	err error
 }
 
-func (cs constSelector) Select(addr Address) (bool, error) {
+func (cs constSelector) Select(addr grpcresolver.Address) (bool, error) {
 	return cs.ok, cs.err
 }
