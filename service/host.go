@@ -17,8 +17,6 @@ import (
 	"sync"
 	"syscall"
 
-	grpcresolver "google.golang.org/grpc/resolver"
-
 	grpc_middleware "github.com/grpc-ecosystem/go-grpc-middleware"
 	grpc_zap "github.com/grpc-ecosystem/go-grpc-middleware/logging/zap"
 	"github.com/oldjon/gutil/env"
@@ -38,6 +36,7 @@ import (
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"google.golang.org/grpc"
+	grpcresolver "google.golang.org/grpc/resolver"
 	"gopkg.in/natefinch/lumberjack.v2"
 )
 

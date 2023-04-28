@@ -56,6 +56,5 @@ require (
 )
 
 replace (
-	github.com/coreos/go-systemd => github.com/coreos/go-systemd/v22 v22.1.0
 	github.com/oldjon/gutil v0.0.0 => ../gutil
 )

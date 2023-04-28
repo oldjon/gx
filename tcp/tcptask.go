@@ -220,7 +220,7 @@ func (tt *TCPTask) RecvLoop() {
 		}
 
 		tt.Derived.ParseMsg(msgBuff[:dataSize])
-		tt.recvBuff.RdFlip(dataSize)
+		tt.recvBuff.ReadFlip(dataSize)
 	}
 }
 
@@ -249,7 +249,7 @@ func (tt *TCPTask) SendLoop(job *sync.WaitGroup) {
 			for {
 				tt.sendMutex.Lock()
 				if tt.sendBuff.ReadReady() {
-					tmpByte.Append(tt.sendBuff.ReadBuf()[:tt.sendBuff.ReadSize()]...)
+					tmpByte.Append(tt.sendBuff.ReadBuf()...)
 					tt.sendBuff.Reset()
 				}
 				tt.sendMutex.Unlock()
@@ -258,12 +258,12 @@ func (tt *TCPTask) SendLoop(job *sync.WaitGroup) {
 					break
 				}
 
-				writeNum, err = tt.Conn.Write(tmpByte.ReadBuf()[:tmpByte.ReadSize()])
+				writeNum, err = tt.Conn.Write(tmpByte.ReadBuf())
 				if err != nil {
 					tt.logger.Error("conn send data failed ", zap.String("remote_addr", tt.RemoteAddr()), zap.Error(err))
 					return
 				}
-				tmpByte.RdFlip(writeNum)
+				tmpByte.ReadFlip(writeNum)
 			}
 		case <-tt.stoppedChan:
 			return

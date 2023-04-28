@@ -17,7 +17,7 @@ import (
 // bot provide ModuleProvider other than Module so Module can be created lazily
 type ModuleProvider interface {
 	DefaultName() string
-	Create(ModuleDriver) (Module, error) // passing parameter should be ScopedHost type, but now for compatible reason , it is Host now
+	Create(ModuleDriver) (Module, error)
 }
 
 func ModuleProviderFromFunc(name string, cf func(ModuleDriver) (Module, error)) ModuleProvider {
