@@ -13,7 +13,7 @@ type ModuleConfig struct {
 	// grpc resolver is used to save address and metadata to etcd. Due to current implementation
 	// in grpc and etcd, metadata is used as key of map, so metadata can not be type that can not
 	// be hashed, such as map. If you want to store complex metadata, consider store it as marshalled
-	// json string. This constrain may be releaxed in future version of grpc
+	// json string. This constrain may be relaxed in future version of grpc
 	Metadata interface{}
 
 	// EnableTLS enable tls for this module

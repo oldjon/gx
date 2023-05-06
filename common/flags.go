@@ -11,7 +11,6 @@ const (
 )
 
 func init() {
-	viper.SetDefault("GX_ENABLE_EVENT_LOGGER_FLOAT_FIX", false)
 	viper.SetDefault("GX_DISABLE_ETCD", false)
 	viper.SetDefault("GX_DISABLE_EVENT_LOGGER", false)
 	viper.SetDefault("GX_ENABLE_HTTP_RICH_TRACE", false)
@@ -24,14 +23,11 @@ func init() {
 	viper.SetDefault("GX_ENABLE_GRPC_LOGGER_ADD_UUID", false)
 	viper.SetDefault("GX_ENABLE_UNIFIED_HTTP_METRICS_NAME", false)
 	viper.SetDefault("GX_HTTP_TRACE_DISABLED_PATHS", "")
+	viper.SetDefault("FX_ENABLE_INTERNAL_CONFIG_VARIABLES", false)
 }
 
 func IsETCDEnabled() bool {
 	return !viper.GetBool("GX_DISABLE_ETCD")
-}
-
-func IsEventLoggerFloatFixEnabled() bool {
-	return viper.GetBool("GX_ENABLE_EVENT_LOGGER_FLOAT_FIX")
 }
 
 func IsEventLoggerEnabled() bool {
@@ -86,4 +82,8 @@ func GetHTTPTraceDisabledPaths() []string {
 
 	paths := strings.Split(pathsStr, ",")
 	return paths
+}
+
+func IsInternalConfigVariablesEnabled() bool {
+	return viper.GetBool("FX_ENABLE_INTERNAL_CONFIG_VARIABLES")
 }

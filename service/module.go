@@ -212,7 +212,7 @@ func (md *moduleDriver) serve(ctx context.Context) error {
 
 type PreServeHook func(ctx context.Context) error
 
-func (md *moduleDriver) initModuleConfig(core *viper.Viper, configVariables map[string]*viper.Viper, forkName string) error {
+func (md *moduleDriver) initModuleConfig(core *viper.Viper, configVariables map[string]env.VarReader, forkName string) error {
 	var sub *viper.Viper
 
 	// verify host config has submodule config

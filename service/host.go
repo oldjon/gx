@@ -5,7 +5,6 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
-	"io/ioutil"
 	"net/http"
 	"net/http/pprof"
 	"os"
@@ -17,8 +16,8 @@ import (
 	"sync"
 	"syscall"
 
-	grpc_middleware "github.com/grpc-ecosystem/go-grpc-middleware"
-	grpc_zap "github.com/grpc-ecosystem/go-grpc-middleware/logging/zap"
+	grpcMiddleware "github.com/grpc-ecosystem/go-grpc-middleware"
+	grpcZap "github.com/grpc-ecosystem/go-grpc-middleware/logging/zap"
 	"github.com/oldjon/gutil/env"
 	"github.com/oldjon/gx/common"
 	"github.com/oldjon/gx/modules/grpc/resolver"
@@ -31,12 +30,12 @@ import (
 	"github.com/spf13/viper"
 	etcd "go.etcd.io/etcd/client/v3"
 	"go.etcd.io/etcd/client/v3/concurrency"
-	etcdns "go.etcd.io/etcd/client/v3/namespace"
-	etcdyaml "go.etcd.io/etcd/client/v3/yaml"
+	etcdNS "go.etcd.io/etcd/client/v3/namespace"
+	etcdYaml "go.etcd.io/etcd/client/v3/yaml"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"google.golang.org/grpc"
-	grpcresolver "google.golang.org/grpc/resolver"
+	grpcResolver "google.golang.org/grpc/resolver"
 	"gopkg.in/natefinch/lumberjack.v2"
 )
 
@@ -47,6 +46,7 @@ const (
 type Host interface {
 	Name() string
 	Logger() *zap.Logger
+	EventLogger() *EventLogger
 	ModuleConfig() env.ModuleConfig
 	Serve() error
 	RegisterModule(moduleName string, addr string, metaData interface{}) error
@@ -77,13 +77,15 @@ type host struct {
 	cron *cron.Cron
 
 	viper           *viper.Viper
-	configVariables map[string]*viper.Viper
+	configVariables map[string]env.VarReader
 
 	moduleConfig env.ModuleConfig
 
-	logLevel     zap.AtomicLevel
-	logger       *zap.Logger
-	loggerOnExit func() error
+	logLevel          zap.AtomicLevel
+	logger            *zap.Logger
+	loggerOnExit      func() error
+	eventLogger       *EventLogger
+	eventLoggerOnExit func() error
 
 	registry *prometheus.Registry
 
@@ -244,7 +246,7 @@ func (h *host) RegisterModule(moduleName string, addr string, metaData interface
 
 	r := resolver.NewResolver(h.etcdClient)
 
-	gAddr := grpcresolver.Address{
+	gAddr := grpcResolver.Address{
 		Addr:     addr,
 		Metadata: metaData,
 	}
@@ -262,6 +264,10 @@ func (h *host) Metrics() prometheus.Registerer {
 
 func (h *host) GetConfigPath() string {
 	return h.configPath
+}
+
+func (h *host) EventLogger() *EventLogger {
+	return h.eventLogger
 }
 
 func (h *host) EtcdSession() *concurrency.Session {
@@ -310,7 +316,7 @@ func (h *host) setupConfig() error {
 	}
 
 	// load variables
-	variables := make(map[string]*viper.Viper)
+	variables := make(map[string]env.VarReader)
 	if common.IsConfigVariablesEnabled() {
 		// create secret viper to read variables file
 		files := common.GetConfigVariablesFiles()
@@ -330,6 +336,12 @@ func (h *host) setupConfig() error {
 			}
 		}
 	}
+
+	if common.IsInternalConfigVariablesEnabled() {
+		// create from fx internal variables
+		variables["gxinternal"] = newInternalVariables()
+	}
+
 	h.configVariables = variables
 
 	return nil
@@ -422,6 +434,121 @@ func (h *host) setupLogging() error {
 	return nil
 }
 
+func (h *host) setupEventLogging() error {
+	// if FX_DISABLE_EVENT_LOGGER is set to true, we turn off event logger support
+	if !common.IsEventLoggerEnabled() {
+		h.logger.Warn("event Logger create is skipped")
+		return nil
+	}
+
+	var elConfig eventLoggingConfig
+	cr := env.NewModuleConfig(h.viper, h.configVariables)
+	if err := cr.UnmarshalKey("event_logging", &elConfig); err != nil {
+		return errors.WithStack(err)
+	}
+
+	if len(elConfig.Channels) == 0 {
+		// to compatible with file channel, we add file channel if channel list is empty
+		elConfig.Channels = make([]eventLoggingChannelConfig, 1)
+		elConfig.Channels[0] = eventLoggingChannelConfig{
+			EnableChannel: true,
+			ChannelType:   "file",
+			ChannelPath:   elConfig.Path,
+		}
+	}
+
+	elLoggers := make(map[eventLoggerChannel]*zap.Logger, len(elConfig.Channels))
+	rotateWriters := make([]*lumberjack.Logger, len(elConfig.Channels))
+	for i, elChannelConfig := range elConfig.Channels {
+		elChannel, err := h.setupEventLoggingChannel(elConfig, elChannelConfig)
+		if err != nil {
+			return fmt.Errorf("failed to setup el channel: %w", err)
+		}
+
+		elLoggers[elChannel.Type] = elChannel.Logger
+		rotateWriters[i] = elChannel.RotateWriter
+	}
+
+	h.eventLogger = &EventLogger{
+		metadata: elConfig.MetaData,
+		loggers:  elLoggers,
+	}
+
+	h.eventLoggerOnExit = func() error {
+		_ = h.eventLogger.Sync()
+		for _, rotateWriter := range rotateWriters {
+			_ = rotateWriter.Rotate()
+		}
+		return nil
+	}
+
+	return nil
+}
+
+type eventLoggingChannel struct {
+	Type         eventLoggerChannel
+	Logger       *zap.Logger
+	RotateWriter *lumberjack.Logger
+}
+
+func (h *host) setupEventLoggingChannel(elConfig eventLoggingConfig, channelConfig eventLoggingChannelConfig) (*eventLoggingChannel, error) {
+	absPath, err := filepath.Abs(channelConfig.ChannelPath)
+	if err != nil {
+		return nil, errors.WithStack(err)
+	}
+
+	if elConfig.Unique {
+		absPath = joinLogPathWithInstanceID(absPath, h.instanceID)
+	}
+
+	rotateWriter := &lumberjack.Logger{
+		Filename:  absPath,
+		MaxSize:   int(elConfig.MaxSize), // MB
+		LocalTime: elConfig.LocalTime,
+	}
+
+	var elType eventLoggerChannel
+	var encoder zapcore.Encoder
+
+	switch channelConfig.ChannelType {
+	case "file":
+		elType = eventLoggerChannelFile
+		encoderConfig := zapcore.EncoderConfig{
+			TimeKey:    "ts",
+			MessageKey: "event",
+			LineEnding: zapcore.DefaultLineEnding,
+			EncodeTime: zapcore.EpochTimeEncoder,
+		}
+		encoder = zapcore.NewJSONEncoder(encoderConfig)
+	default:
+		return nil, fmt.Errorf("do not support el channel: %s", channelConfig.ChannelType)
+	}
+
+	core := zapcore.NewCore(encoder, zapcore.AddSync(rotateWriter), zap.NewAtomicLevelAt(zap.InfoLevel))
+
+	logger := zap.New(core)
+
+	// rotate event log file
+	h.logger.Info("add event log file rotate cron job", zap.String("cron", elConfig.Cron), zap.String("elChannel", channelConfig.ChannelType))
+	err = h.cron.AddFunc(elConfig.Cron, func() {
+		l := h.logger.With(zap.String("path", absPath))
+		l.Info("rotating event log file")
+		if err := rotateWriter.Rotate(); err != nil {
+			l.Error("failed to rotate event log file", zap.Error(err))
+		}
+		l.Info("rotated event log file")
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to add rotate of elChannel[%s] to cron job, %w", absPath, err)
+	}
+
+	return &eventLoggingChannel{
+		Type:         elType,
+		Logger:       logger,
+		RotateWriter: rotateWriter,
+	}, nil
+}
+
 func (h *host) setupEtcd() error {
 	if !common.IsETCDEnabled() {
 		h.logger.Warn("etcd bot is disabled, skipping setup")
@@ -429,7 +556,7 @@ func (h *host) setupEtcd() error {
 	}
 
 	h.logger.Info("creating etcd bot")
-	etcdCfg, err := etcdyaml.NewConfig(path.Join(h.configPath, "etcd.yaml"))
+	etcdCfg, err := etcdYaml.NewConfig(path.Join(h.configPath, "etcd.yaml"))
 	if err != nil {
 		return errors.WithStack(err)
 	}
@@ -440,15 +567,15 @@ func (h *host) setupEtcd() error {
 
 	etcdCfg.DialOptions = []grpc.DialOption{
 		grpc.WithUnaryInterceptor(
-			grpc_middleware.ChainUnaryClient(
-				grpc_zap.UnaryClientInterceptor(h.logger),
-				grpc_zap.PayloadUnaryClientInterceptor(h.logger, logAll),
+			grpcMiddleware.ChainUnaryClient(
+				grpcZap.UnaryClientInterceptor(h.logger),
+				grpcZap.PayloadUnaryClientInterceptor(h.logger, logAll),
 			),
 		),
 		grpc.WithStreamInterceptor(
-			grpc_middleware.ChainStreamClient(
-				grpc_zap.StreamClientInterceptor(h.logger),
-				grpc_zap.PayloadStreamClientInterceptor(h.logger, logAll),
+			grpcMiddleware.ChainStreamClient(
+				grpcZap.StreamClientInterceptor(h.logger),
+				grpcZap.PayloadStreamClientInterceptor(h.logger, logAll),
 			),
 		),
 	}
@@ -459,9 +586,9 @@ func (h *host) setupEtcd() error {
 
 	prefix := "/" + h.Name() + "/"
 	h.logger.Info("etcd prefix is " + prefix)
-	client.KV = etcdns.NewKV(client.KV, prefix)
-	client.Lease = etcdns.NewLease(client.Lease, prefix)
-	client.Watcher = etcdns.NewWatcher(client.Watcher, prefix)
+	client.KV = etcdNS.NewKV(client.KV, prefix)
+	client.Lease = etcdNS.NewLease(client.Lease, prefix)
+	client.Watcher = etcdNS.NewWatcher(client.Watcher, prefix)
 
 	h.etcdClient = client
 	h.logger.Info("created etcd bot")
@@ -492,7 +619,7 @@ func (h *host) setupTLS() error {
 	return nil
 }
 
-// convert logLevel string to zapcore.Level, use defaultLevel if logLevel is empty
+// convert logLevel string to zapCore.Level, use defaultLevel if logLevel is empty
 func strToLevel(level string, defaultLevel zapcore.Level) (zapcore.Level, error) {
 	if len(level) != 0 {
 		if err := defaultLevel.UnmarshalText([]byte(level)); err != nil {
@@ -552,7 +679,7 @@ func (h *host) setupInternalServer() error {
 
 	// setup bot auth
 	if h.tlsConfig.EnableTLS && isCfg.AuthClient {
-		ca, err := ioutil.ReadFile(h.tlsConfig.CAFile)
+		ca, err := os.ReadFile(h.tlsConfig.CAFile)
 		if err != nil {
 			return fmt.Errorf("count not read certificate file: %s", err)
 		}
@@ -789,16 +916,16 @@ func (h *host) cleanup() error {
 
 	if h.etcdSession != nil {
 		h.logger.Info("closing etcd etcdSession")
-		h.etcdSession.Close()
+		_ = h.etcdSession.Close()
 		h.etcdSession = nil
 	}
-	// if h.eventLogger != nil {
-	// 	h.logger.Info("exit event Logger")
-	// 	if err := h.eventLoggerOnExit(); err != nil {
-	// 		h.logger.Error("event Logger on exit failed", zap.Error(err))
-	// 	}
-	// 	h.eventLogger = nil
-	// }
+	if h.eventLogger != nil {
+		h.logger.Info("exit event Logger")
+		if err := h.eventLoggerOnExit(); err != nil {
+			h.logger.Error("event Logger on exit failed", zap.Error(err))
+		}
+		h.eventLogger = nil
+	}
 	if h.logger != nil {
 		h.logger.Info("exit Logger")
 		if err := h.loggerOnExit(); err != nil {
