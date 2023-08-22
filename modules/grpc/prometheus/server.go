@@ -20,7 +20,7 @@ func New(opts Options) *Middleware {
 }
 
 // Register takes a gRPC server and pre-initializes all counters to 0.
-// This allows for easier monitoring in Prometheus (no missing metrics), and should be called *after* all services have
+// This allows for easier monitoring in Prometheus (no missing metrics), and should be called *after* all m_services have
 // been registered with the server.
 // Currently FX will not call this function. It looks unnecessary
 // func Register(server *grpc.Server, mid *Middleware) {

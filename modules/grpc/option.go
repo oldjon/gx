@@ -7,16 +7,16 @@ const (
 	UnaryServerMiddlewareZapLog        UnaryServerMiddlewareName = "Zaplog"
 	UnaryServerMiddlewarePayloadLogger UnaryServerMiddlewareName = "PayloadLogger"
 	UnaryServerMiddlewareTag           UnaryServerMiddlewareName = "Tag"
-	// UnaryServerMiddlewareEventLogger   UnaryServerMiddlewareName = "EventLogger"
-	UnaryServerMiddlewareMetrics UnaryServerMiddlewareName = "Metrics"
-	// UnaryServerMiddlewareTracer        UnaryServerMiddlewareName = "Tracer"
-	UnaryServerMiddlewareRecovery UnaryServerMiddlewareName = "Recovery"
+	UnaryServerMiddlewareEventLogger   UnaryServerMiddlewareName = "EventLogger"
+	UnaryServerMiddlewareMetrics       UnaryServerMiddlewareName = "Metrics"
+	UnaryServerMiddlewareTracer        UnaryServerMiddlewareName = "Tracer"
+	UnaryServerMiddlewareRecovery      UnaryServerMiddlewareName = "Recovery"
 
 	UnaryClientMiddlewareZaplog        UnaryClientMiddlewareName = "Zaplog"
 	UnaryClientMiddlewarePayloadLogger UnaryClientMiddlewareName = "PayloadLogger"
 	UnaryClientMiddlewareTag           UnaryClientMiddlewareName = "Tag"
 	UnaryClientMiddlewareRetry         UnaryClientMiddlewareName = "Retry"
-	// UnaryClientMiddlewareTracer        UnaryClientMiddlewareName = "Tracer"
+	UnaryClientMiddlewareTracer        UnaryClientMiddlewareName = "Tracer"
 )
 
 var (
@@ -35,18 +35,18 @@ var (
 				Name:        UnaryServerMiddlewareTag,
 				Interceptor: TagUnaryServerInterceptor,
 			},
-			// {
-			// 	Name:        UnaryServerMiddlewareEventLogger,
-			// 	Interceptor: EventLoggingUnaryServerInterceptor,
-			// },
+			{
+				Name:        UnaryServerMiddlewareEventLogger,
+				Interceptor: EventLoggingUnaryServerInterceptor,
+			},
 			{
 				Name:        UnaryServerMiddlewareMetrics,
 				Interceptor: MetricsUnaryServerInterceptor,
 			},
-			// {
-			// 	Name:        UnaryServerMiddlewareTracer,
-			// 	Interceptor: TracerUnaryServerInterceptor,
-			// },
+			{
+				Name:        UnaryServerMiddlewareTracer,
+				Interceptor: TracerUnaryServerInterceptor,
+			},
 			{
 				Name:        UnaryServerMiddlewareRecovery,
 				Interceptor: RecoveryUnaryServerInterceptor,
@@ -69,10 +69,10 @@ var (
 				Name:        UnaryClientMiddlewareRetry,
 				Interceptor: RetryClientInterceptor,
 			},
-			// {
-			// 	Name:        UnaryClientMiddlewareTracer,
-			// 	Interceptor: TracerClientInterceptor,
-			// },
+			{
+				Name:        UnaryClientMiddlewareTracer,
+				Interceptor: TracerClientInterceptor,
+			},
 		},
 	}
 )

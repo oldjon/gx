@@ -5,6 +5,8 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
+	"github.com/opentracing/opentracing-go"
+	"io"
 	"net/http"
 	"net/http/pprof"
 	"os"
@@ -28,6 +30,11 @@ import (
 	"github.com/robfig/cron"
 	"github.com/spf13/pflag"
 	"github.com/spf13/viper"
+	"github.com/uber/jaeger-client-go"
+	jaegercfg "github.com/uber/jaeger-client-go/config"
+	jaegerzap "github.com/uber/jaeger-client-go/log/zap"
+	jaegermetrics "github.com/uber/jaeger-lib/metrics"
+	jaegerprom "github.com/uber/jaeger-lib/metrics/prometheus"
 	etcd "go.etcd.io/etcd/client/v3"
 	"go.etcd.io/etcd/client/v3/concurrency"
 	etcdNS "go.etcd.io/etcd/client/v3/namespace"
@@ -53,7 +60,11 @@ type Host interface {
 	GetConfigPath() string
 	Metrics() prometheus.Registerer
 	EtcdSession() *concurrency.Session
-	KVManager() *KVManager
+	KVManager() *KVMgr
+	Snowflake(ctx context.Context, name string, tp uint32) (Snowflake, error)
+	Tags() map[string]string
+	setupModuleTracer(moduleName string) error
+	Tracer(moduleName string) opentracing.Tracer
 }
 
 type Option func(h *host)
@@ -68,6 +79,17 @@ func WithLogger(logger *zap.Logger) Option {
 	return func(h *host) {
 		h.logger = logger
 	}
+}
+
+var supportTracingSampler = map[string]bool{
+	jaeger.SamplerTypeConst:         true,
+	jaeger.SamplerTypeProbabilistic: true,
+	jaeger.SamplerTypeRateLimiting:  true,
+}
+
+type tracerEntry struct {
+	tracer opentracing.Tracer
+	closer io.Closer
 }
 
 type host struct {
@@ -108,7 +130,16 @@ type host struct {
 
 	etcdClient  *etcd.Client
 	etcdSession *concurrency.Session
-	kvManager   *KVManager
+	kvManager   *KVMgr
+
+	snowflakeMux sync.Mutex
+	snowflakeMap map[string]Snowflake
+
+	// modules have their own tracers
+	tracersMutex     sync.Mutex
+	tracingConfig    tracingConfig
+	jeagermtrFactory jaegermetrics.Factory
+	tracers          map[string]tracerEntry
 }
 
 func newHost(b Builder) (Host, error) {
@@ -122,6 +153,8 @@ func newHost(b Builder) (Host, error) {
 		signalCh:      make(chan os.Signal),
 		errorCh:       make(chan error, 128),
 		instanceID:    strconv.FormatUint(randomID(), 36),
+		snowflakeMap:  make(map[string]Snowflake),
+		tracers:       make(map[string]tracerEntry),
 	}
 	for _, o := range b.options {
 		o(h)
@@ -131,6 +164,9 @@ func newHost(b Builder) (Host, error) {
 		return nil, errors.WithStack(err)
 	}
 	if err := h.setupLogging(); err != nil {
+		return nil, errors.WithStack(err)
+	}
+	if err := h.setupEventLogging(); err != nil {
 		return nil, errors.WithStack(err)
 	}
 	// this should be as early as possible, other subsystem may dependent on it
@@ -144,6 +180,9 @@ func newHost(b Builder) (Host, error) {
 		return nil, errors.WithStack(err)
 	}
 	if err := h.setupKeysManager(); err != nil {
+		return nil, errors.WithStack(err)
+	}
+	if err := h.setupTracingConfig(); err != nil {
 		return nil, errors.WithStack(err)
 	}
 
@@ -210,7 +249,6 @@ func (h *host) Serve() error {
 			}
 			h.logger.Error("some module failed")
 			moduleCancel()
-
 		case <-h.moduleCloseCh:
 			h.moduleStopCounter++
 
@@ -247,8 +285,9 @@ func (h *host) RegisterModule(moduleName string, addr string, metaData interface
 	r := resolver.NewResolver(h.etcdClient)
 
 	gAddr := grpcResolver.Address{
-		Addr:     addr,
-		Metadata: metaData,
+		Addr:       addr,
+		ServerName: "/" + moduleName,
+		Metadata:   metaData,
 	}
 
 	err := r.Register(context.Background(), moduleName, gAddr, h.EtcdSession().Lease())
@@ -274,7 +313,7 @@ func (h *host) EtcdSession() *concurrency.Session {
 	return h.etcdSession
 }
 
-func (h *host) KVManager() *KVManager {
+func (h *host) KVManager() *KVMgr {
 	return h.kvManager
 }
 
@@ -583,7 +622,7 @@ func (h *host) setupEtcd() error {
 	if err != nil {
 		return errors.WithStack(err)
 	}
-
+	client.WithLogger(h.logger)
 	prefix := "/" + h.Name() + "/"
 	h.logger.Info("etcd prefix is " + prefix)
 	client.KV = etcdNS.NewKV(client.KV, prefix)
@@ -601,7 +640,7 @@ func (h *host) setupKeysManager() error {
 		return nil
 	}
 
-	h.kvManager = &KVManager{
+	h.kvManager = &KVMgr{
 		client: h.etcdClient,
 		logger: h.logger,
 	}
@@ -703,6 +742,34 @@ func (h *host) ModuleConfig() env.ModuleConfig {
 	return h.moduleConfig
 }
 
+func (h *host) Snowflake(ctx context.Context, name string, sftp uint32) (Snowflake, error) {
+	h.snowflakeMux.Lock()
+	defer h.snowflakeMux.Unlock()
+	sf, ok := h.snowflakeMap[name]
+	if ok {
+		return sf, nil
+	}
+
+	if h.etcdSession == nil {
+		return nil, fmt.Errorf("etcd session is not created, can't create snowflake")
+	}
+	var err error
+	switch sftp {
+	case SnowflakeType_Default:
+		sf, err = newSnowflake(ctx, h.etcdSession, h.logger, name)
+	case SnowflakeType_53:
+		sf, err = newSnowflake53(ctx, h.etcdSession, h.logger, name)
+	default:
+		return nil, fmt.Errorf("snowflake type unsupported: %d", sftp)
+	}
+	if err != nil {
+		return nil, errors.WithStack(err)
+	}
+	h.snowflakeMap[name] = sf
+
+	return sf, nil
+}
+
 func (h *host) addModule(mi moduleInfo) error {
 	module, supported, err := newModuleDriver(h, mi, h.tlsConfig, "")
 	if err != nil {
@@ -723,6 +790,7 @@ func (h *host) addModule(mi moduleInfo) error {
 		zap.String("service", module.options.serviceName),
 		zap.String("module", module.options.moduleName),
 		zap.Strings("host_roles", h.serviceConfig.Roles),
+		zap.Any("host_tags", h.serviceConfig.Tags),
 	)
 	h.modules = append(h.modules, module)
 
@@ -758,6 +826,79 @@ func (h *host) addModule(mi moduleInfo) error {
 	}
 
 	return nil
+}
+
+func (h *host) setupTracingConfig() error {
+	var tracingCfg tracingConfig
+	if err := h.viper.UnmarshalKey("tracing", &tracingCfg); err != nil {
+		return errors.WithStack(err)
+	}
+
+	if tracingCfg.Sampler == "" {
+		tracingCfg.Sampler = jaeger.SamplerTypeProbabilistic
+	}
+
+	if _, ok := supportTracingSampler[tracingCfg.Sampler]; !ok {
+		return fmt.Errorf("invalid sampler type: %s", tracingCfg.Sampler)
+	}
+
+	h.tracingConfig = tracingCfg
+	return nil
+}
+
+func (h *host) setupModuleTracer(name string) error {
+	if !h.tracingConfig.Enable {
+		return nil
+	}
+
+	h.tracersMutex.Lock()
+	defer h.tracersMutex.Unlock()
+
+	if h.jeagermtrFactory == nil {
+		h.jeagermtrFactory = jaegerprom.New(jaegerprom.WithRegisterer(h.registry))
+	}
+
+	if _, ok := h.tracers[name]; ok {
+		return nil
+	}
+
+	cfg := jaegercfg.Configuration{
+		ServiceName: name,
+		Sampler: &jaegercfg.SamplerConfig{
+			Type:  h.tracingConfig.Sampler,
+			Param: h.tracingConfig.Sampling,
+		},
+		Reporter: &jaegercfg.ReporterConfig{
+			LogSpans:           h.tracingConfig.LogSpans,
+			LocalAgentHostPort: h.tracingConfig.Addr,
+		},
+	}
+
+	logger := jaegerzap.NewLogger(h.logger.With(zap.String("tracer", name)))
+	tracer, closer, err := cfg.NewTracer(jaegercfg.Logger(logger),
+		jaegercfg.Metrics(h.jeagermtrFactory),
+	)
+	if err != nil {
+		h.logger.Error("create jaeger tracer failed", zap.String("tracer", name), zap.Error(err))
+		return errors.WithStack(err)
+	}
+
+	h.tracers[name] = tracerEntry{
+		tracer,
+		closer,
+	}
+	return nil
+}
+
+func (h *host) cleanupTracers() {
+	h.tracersMutex.Lock()
+	defer h.tracersMutex.Unlock()
+
+	for moduleName, entry := range h.tracers {
+		h.logger.Info("closing tracer", zap.String("module_name", moduleName))
+		_ = entry.closer.Close()
+		h.logger.Info("closed tracer", zap.String("module_name", moduleName))
+	}
 }
 
 func (h *host) serveModule(ctx context.Context) {
@@ -822,7 +963,7 @@ func (h *host) prepare(ctx context.Context) error {
 	}
 
 	// internal server
-	h.serveInternalServer(ctx)
+	h.startInternalServer(ctx)
 
 	// start cron
 	h.logger.Info("starting cron")
@@ -834,7 +975,7 @@ func (h *host) prepare(ctx context.Context) error {
 	return nil
 }
 
-func (h *host) serveInternalServer(ctx context.Context) {
+func (h *host) startInternalServer(ctx context.Context) {
 	h.internalRunningWG.Add(1)
 	go func() {
 		h.logger.Info("enter internal server goroutine")
@@ -908,6 +1049,7 @@ func (h *host) cleanup() error {
 	h.logger.Info("cleaning up host")
 
 	h.logger.Info("closing tracers")
+	h.cleanupTracers()
 	h.logger.Info("closed tracers")
 
 	h.logger.Info("stopping cron")
@@ -918,6 +1060,7 @@ func (h *host) cleanup() error {
 		h.logger.Info("closing etcd etcdSession")
 		_ = h.etcdSession.Close()
 		h.etcdSession = nil
+		h.logger.Info("closing etcd etcdSession done")
 	}
 	if h.eventLogger != nil {
 		h.logger.Info("exit event Logger")
@@ -925,6 +1068,7 @@ func (h *host) cleanup() error {
 			h.logger.Error("event Logger on exit failed", zap.Error(err))
 		}
 		h.eventLogger = nil
+		h.logger.Info("exit event Logger done")
 	}
 	if h.logger != nil {
 		h.logger.Info("exit Logger")
@@ -932,10 +1076,24 @@ func (h *host) cleanup() error {
 			// Logger is existing, try to save the error to stdout
 			fmt.Printf("error happen during loggerOnExit, %s", err)
 		}
-
 		h.logger = nil
 	}
 	return nil
+}
+
+func (h *host) Tags() map[string]string {
+	return h.serviceConfig.Tags
+}
+
+func (h *host) Tracer(moduleName string) opentracing.Tracer {
+	if !h.tracingConfig.Enable {
+		return opentracing.NoopTracer{}
+	}
+
+	if entry, ok := h.tracers[moduleName]; ok {
+		return entry.tracer
+	}
+	return opentracing.NoopTracer{}
 }
 
 func nonblockingError(errorCh chan<- error, err error) {

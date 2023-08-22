@@ -3,21 +3,18 @@ package grpc
 import (
 	"context"
 
-	"google.golang.org/grpc"
-
 	healthproto "github.com/oldjon/gx/modules/grpc/proto"
+	"google.golang.org/grpc"
 )
 
 type healthHandler struct {
+	healthproto.UnimplementedHealthServiceServer
 }
 
 func (h *healthHandler) RegisterServer(s *grpc.Server) {
-	healthproto.RegisterFxHealthServiceServer(s, h)
+	healthproto.RegisterHealthServiceServer(s, h)
 }
 
-func (h *healthHandler) Ping(ctx context.Context, req *healthproto.FxHealth_PingRequest) (*healthproto.FxHealth_PingResponse, error) {
-	_ = ctx
-	_ = req
-
-	return &healthproto.FxHealth_PingResponse{}, nil
+func (h *healthHandler) Ping(_ context.Context, _ *healthproto.Health_PingRequest) (*healthproto.Health_PingResponse, error) {
+	return &healthproto.Health_PingResponse{}, nil
 }

@@ -172,7 +172,7 @@ func (r *serverReporter) Handled(code codes.Code) {
 
 }
 
-// preRegisterMethod is invoked on Register of a Server, allowing all gRPC services labels to be pre-populated.
+// preRegisterMethod is invoked on Register of a Server, allowing all gRPC m_services labels to be pre-populated.
 // func preRegisterMethod(serviceName string, mInfo *grpc.MethodInfo, mid *Middleware) {
 // 	methodName := mInfo.Name
 // 	methodType := string(typeFromMethodInfo(mInfo))

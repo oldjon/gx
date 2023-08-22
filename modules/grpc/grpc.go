@@ -11,12 +11,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/oldjon/gx/common"
-
 	"github.com/google/uuid"
 	grpc_middleware "github.com/grpc-ecosystem/go-grpc-middleware"
 	grpc_zap "github.com/grpc-ecosystem/go-grpc-middleware/logging/zap"
 	grpc_ctxtags "github.com/grpc-ecosystem/go-grpc-middleware/tags"
+	"github.com/oldjon/gx/common"
 	"github.com/oldjon/gx/modules"
 	grpcprom "github.com/oldjon/gx/modules/grpc/prometheus"
 	grpcrecover "github.com/oldjon/gx/modules/grpc/recover"
@@ -40,9 +39,11 @@ type ModuleConfig struct {
 }
 
 // nolint: revive
-//  nolint explain, the GRPCServer class is used for a long time , could not change that name
+//
+//	nolint explain, the GRPCServer class is used for a long time , could not change that name
+//
 // implement service.ModuleServer Serve method to run an internal loop
-// implement service.ModuleCloser Close method to release resource or connection while app exit
+// implement service.ModuleCloser Close method to release resources or connection while app exit
 type GRPCServer interface {
 	Register(*grpc.Server)
 }

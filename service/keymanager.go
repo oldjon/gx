@@ -10,13 +10,13 @@ import (
 	"go.uber.org/zap"
 )
 
-type KVManager struct {
+type KVMgr struct {
 	client *etcd.Client
 	logger *zap.Logger
 }
 
 // GetOrSet get key or set key if key does not exist atomic
-func (km *KVManager) GetOrSet(ctx context.Context, key string, val []byte) ([]byte, error) {
+func (km *KVMgr) GetOrSet(ctx context.Context, key string, val []byte) ([]byte, error) {
 	path := keysPrefix + key
 
 	logger := km.logger.With(
@@ -35,7 +35,7 @@ func (km *KVManager) GetOrSet(ctx context.Context, key string, val []byte) ([]by
 }
 
 // GetOrGenerate get key or generate key if key does not exist atomic
-func (km *KVManager) GetOrGenerate(ctx context.Context, key string, length int) ([]byte, error) {
+func (km *KVMgr) GetOrGenerate(ctx context.Context, key string, length int) ([]byte, error) {
 	val := make([]byte, length)
 	_, err := rand.Read(val)
 	if err != nil {
@@ -48,7 +48,7 @@ func (km *KVManager) GetOrGenerate(ctx context.Context, key string, length int) 
 }
 
 // Delete key from keys manager
-func (km *KVManager) Delete(ctx context.Context, key string) error {
+func (km *KVMgr) Delete(ctx context.Context, key string) error {
 	path := keysPrefix + key
 
 	logger := km.logger.With(

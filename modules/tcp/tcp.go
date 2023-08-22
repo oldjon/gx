@@ -24,7 +24,7 @@ type ModuleConfig struct {
 }
 
 type GXTCPHandler interface {
-	HandleConn(context.Context, *net.TCPConn)
+	HandleConn(*net.TCPConn)
 }
 
 type HandlerProviderFunc func(driver service.ModuleDriver) (GXTCPHandler, error)
@@ -115,11 +115,16 @@ func (m *module) bindAndAccept(ctx context.Context, address string, handler GXTC
 	}
 	go func() {
 		for {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
 			conn, err := m.accept()
 			if err != nil {
 				continue
 			}
-			handler.HandleConn(ctx, conn)
+			handler.HandleConn(conn)
 		}
 	}()
 	return nil
@@ -137,7 +142,7 @@ func (m *module) Serve(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("failed to call unmarshalConfig, %w", err)
 	}
-	logger.Info("http module config", zap.Any("module_config", m.moduleConfig))
+	logger.Info("tcp module config", zap.Any("module_config", m.moduleConfig))
 
 	// pm := NewMetrics(MetricsOptions{
 	// 	HostName:   m.driver.Host().Name(),
@@ -148,37 +153,44 @@ func (m *module) Serve(ctx context.Context) error {
 	// 	Timeout: time.Duration(m.moduleConfig.HandlerTimeout) * time.Second,
 	// })
 	errorCh := make(chan error, 1)
-	ctx, cancel := context.WithCancel(ctx)
-	var running sync.WaitGroup
+	mCtx, cancel := context.WithCancel(ctx)
+	var running = &sync.WaitGroup{}
 	moduleServer, ok := m.handler.(service.ModuleServer)
 	if ok {
 		running.Add(1)
-		go func() {
+		go func(running *sync.WaitGroup) {
 			logger.Info("enter module serve goroutine")
 			defer func() {
 				running.Done()
 				logger.Info("exit module serve goroutine")
 			}()
-			if err := moduleServer.Serve(ctx); err != nil {
-				logger.Error("module http serve failed", zap.Error(err))
-				errorCh <- err
+			if err := moduleServer.Serve(mCtx); err != nil {
+				logger.Error("module tcp serve failed", zap.Error(err))
+				select {
+				case errorCh <- err:
+				default:
+				}
 			}
-		}()
+		}(running)
 	}
 
 	// start listen and accept
 	running.Add(1)
-	go func() {
+	go func(running *sync.WaitGroup) {
 		logger.Info("enter module serve goroutine")
 		defer func() {
 			running.Done()
 			logger.Info("exit module serve goroutine")
 		}()
-		err = m.bindAndAccept(ctx, m.moduleConfig.ListenAddress, m.handler)
+		err = m.bindAndAccept(mCtx, m.moduleConfig.ListenAddress, m.handler) // if failed，need to notice the Server goroutine
 		if err != nil {
-			errorCh <- err
+			logger.Error("module tcp bind addr failed", zap.Error(err))
+			select {
+			case errorCh <- err:
+			default:
+			}
 		}
-	}()
+	}(running)
 
 	if common.IsETCDEnabled() {
 		// register module
@@ -192,21 +204,22 @@ func (m *module) Serve(ctx context.Context) error {
 			errorCh <- err
 		}
 	} else {
-		// http register is not mandatory , so we can skip it
+		// tcp register is not mandatory , so we can skip it
 		logger.Warn("register module to etcd is skipped because etcd is disabled")
 	}
 
 	select {
 	case <-ctx.Done():
-		logger.Info("http context done")
+		logger.Info("tcp context done")
 		err = ctx.Err()
 	case e := <-errorCh:
-		logger.Info("http serving failed", zap.Error(err))
+		logger.Info("tcp serving failed", zap.Error(err))
 		err = e
 	}
 	cancel()
-	logger.Info("waiting http exit.")
+	logger.Info("waiting tcp exit.")
 	running.Wait()
+	logger.Info("end wait tcp")
 	return err
 }
 

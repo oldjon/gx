@@ -10,6 +10,7 @@ import (
 	"github.com/NYTimes/gziphandler"
 	"github.com/oldjon/gx/common"
 	"github.com/oldjon/gx/modules"
+	"github.com/oldjon/gx/modules/http/opentracing"
 	"github.com/oldjon/gx/service"
 	"go.uber.org/zap"
 )
@@ -54,7 +55,7 @@ func New(hpf HandlerProviderFunc) service.ModuleProvider {
 }
 
 // implement service.ModuleServer Serve method to run an internal loop
-// implement service.ModuleCloser Close method to release resource or connection while app exit
+// implement service.ModuleCloser Close method to release resources or connection while app exit
 type module struct {
 	driver         service.ModuleDriver
 	hpf            HandlerProviderFunc
@@ -136,6 +137,9 @@ func (m *module) Serve(ctx context.Context) error {
 		Paths:      paths,
 		Registerer: m.driver.Host().Metrics(),
 	})
+	tm := opentracing.New(opentracing.Options{
+		Tracer: m.driver.Tracer(),
+	})
 	tom := NewTimeOut(TimeOutOptions{
 		Timeout: time.Duration(m.moduleConfig.HandlerTimeout) * time.Second,
 	})
@@ -166,7 +170,7 @@ func (m *module) Serve(ctx context.Context) error {
 	if !m.moduleConfig.DisableGzipMiddleware {
 		newHandler = gziphandler.GzipHandler(newHandler)
 	}
-	newHandler = pm.Handler(newHandler)
+	newHandler = pm.Handler(tm.Handler(newHandler))
 
 	m.server = &http.Server{
 		Addr:         m.moduleConfig.ListenAddress,

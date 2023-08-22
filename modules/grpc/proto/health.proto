@@ -1,0 +1,19 @@
+syntax = "proto3";
+
+package base;
+option go_package = "github.com/oldjon/gx/modules/grpc/proto";
+
+message Health{
+    message PingRequest{
+    }
+
+    message PingResponse {
+    }
+}
+
+
+service HealthService {
+    rpc Ping(Health.PingRequest) returns (Health.PingResponse) {}
+}
+
+

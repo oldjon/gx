@@ -5,6 +5,8 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
+	grpc_ot "github.com/grpc-ecosystem/go-grpc-middleware/tracing/opentracing"
+	"github.com/opentracing/opentracing-go"
 	"io/ioutil"
 	"time"
 
@@ -32,9 +34,10 @@ var _ ServiceDialer = (*Dialer)(nil)
 var errDialerRequireEtcd = errors.New("dialer require etcd bot to dial")
 
 type Dialer struct {
+	HostName   string
 	EtcdClient *etcd.Client
 	Logger     *zap.Logger
-	// Tracer     opentracing.Tracer
+	Tracer     opentracing.Tracer
 
 	UnaryClientMiddlewares []UnaryClientMiddleware
 
@@ -125,7 +128,7 @@ func (d *Dialer) interceptorDialOptions() ([]grpc.DialOption, error) {
 				grpcZap.StreamClientInterceptor(logger),
 				grpcZap.PayloadStreamClientInterceptor(logger, decider),
 				grpcRetry.StreamClientInterceptor(callOpts...),
-				// grpc_ot.StreamClientInterceptor(grpc_ot.WithTracer(d.Tracer)),
+				grpc_ot.StreamClientInterceptor(grpc_ot.WithTracer(d.Tracer)),
 			),
 		),
 	}
@@ -136,7 +139,7 @@ func (d *Dialer) interceptorDialOptions() ([]grpc.DialOption, error) {
 type DialerOptions struct {
 	EtcdClient *etcd.Client
 	Logger     *zap.Logger
-	// Tracer     opentracing.Tracer
+	Tracer     opentracing.Tracer
 
 	UnaryClientMiddlewares []UnaryClientMiddleware
 
@@ -169,7 +172,7 @@ func NewDialer(opts DialerOptions) (*Dialer, error) {
 	d := Dialer{
 		EtcdClient: opts.EtcdClient,
 		Logger:     opts.Logger,
-		// Tracer:     opts.Tracer,
+		Tracer:     opts.Tracer,
 
 		UnaryClientMiddlewares: opts.UnaryClientMiddlewares,
 
@@ -231,7 +234,6 @@ func (d *Dialer) DialWithSelector(ctx context.Context, target string, selector r
 
 	dialOpts = append(dialOpts, opts...)
 
-	conn, err := grpc.DialContext(ctx, rBuilder.Scheme()+"://"+"/"+target, dialOpts...) // TODO: add host name
-	fmt.Println(target, dialOpts, err)
+	conn, err := grpc.DialContext(ctx, rBuilder.Scheme()+"://"+d.HostName+"/"+target, dialOpts...)
 	return conn, err
 }

@@ -8,6 +8,8 @@ import (
 	grpc_zap "github.com/grpc-ecosystem/go-grpc-middleware/logging/zap"
 	grpc_retry "github.com/grpc-ecosystem/go-grpc-middleware/retry"
 	grpc_ctxtags "github.com/grpc-ecosystem/go-grpc-middleware/tags"
+	grpc_ot "github.com/grpc-ecosystem/go-grpc-middleware/tracing/opentracing"
+	event_logging "github.com/oldjon/gx/modules/grpc/logging/event"
 	grpc_tags "github.com/oldjon/gx/modules/grpc/tags"
 	"github.com/oldjon/gx/service"
 	"go.uber.org/zap"
@@ -22,7 +24,6 @@ func (m *module) createServerUnaryInterceptors(middlewares []UnaryServerMiddlewa
 		if isOpenLogAddUUID && middleware.Name == UnaryServerMiddlewarePayloadLogger {
 			middleware.Interceptor = PayloadUnaryServerInterceptorWithUUID
 		}
-
 		interceptor := m.createServerUnaryInterceptor(middleware)
 		if interceptor != nil {
 			logger.Info("grpc server unary interceptor is loaded",
@@ -47,7 +48,7 @@ func (m *module) createServerUnaryInterceptor(middleware UnaryServerMiddleware) 
 
 	// build options
 	options := make(map[string]interface{})
-	options["gx.host"] = m.driver.Host()
+	options["gx.driver"] = m.driver
 	options["gx.module"] = m
 
 	interceptor := mi(options)
@@ -56,14 +57,14 @@ func (m *module) createServerUnaryInterceptor(middleware UnaryServerMiddleware) 
 }
 
 func ZapUnaryServerInterceptor(options map[string]interface{}) grpc.UnaryServerInterceptor {
-	host := options["gx.host"].(service.Host)
-	logger := host.Logger()
+	driver := options["gx.driver"].(service.ModuleDriver)
+	logger := driver.Logger()
 	return grpc_zap.UnaryServerInterceptor(logger, grpc_zap.WithCodes(errorToCode))
 }
 
 func PayloadUnaryServerInterceptor(options map[string]interface{}) grpc.UnaryServerInterceptor {
-	host := options["gx.host"].(service.Host)
-	logger := host.Logger()
+	driver := options["gx.driver"].(service.ModuleDriver)
+	logger := driver.Logger()
 
 	decider := func(ctx context.Context, fullMethodName string, servingObject interface{}) bool {
 		return logger.Core().Enabled(zap.DebugLevel)
@@ -72,8 +73,8 @@ func PayloadUnaryServerInterceptor(options map[string]interface{}) grpc.UnarySer
 }
 
 func PayloadUnaryServerInterceptorWithUUID(options map[string]interface{}) grpc.UnaryServerInterceptor {
-	host := options["gx.host"].(service.Host)
-	logger := host.Logger()
+	driver := options["gx.driver"].(service.ModuleDriver)
+	logger := driver.Logger()
 
 	decider := func(ctx context.Context, fullMethodName string, servingObject interface{}) bool {
 		grpc_ctxtags.Extract(ctx).Set("uuid", uuid.NewString())
@@ -87,16 +88,16 @@ func TagUnaryServerInterceptor(options map[string]interface{}) grpc.UnaryServerI
 	return grpc_tags.UnaryServerInterceptor()
 }
 
-// func EventLoggingUnaryServerInterceptor(options map[string]interface{}) grpc.UnaryServerInterceptor {
-// 	host := options["gx.host"].(service.Host)
-//
-// 	eventLogger := host.EventLogger()
-//
-// 	if eventLogger != nil {
-// 		return event_logging.UnaryServerInterceptor(eventLogger)
-// 	}
-// 	return nil
-// }
+func EventLoggingUnaryServerInterceptor(options map[string]interface{}) grpc.UnaryServerInterceptor {
+	driver := options["gx.driver"].(service.ModuleDriver)
+
+	eventLogger := driver.EventLogger()
+
+	if eventLogger != nil {
+		return event_logging.UnaryServerInterceptor(eventLogger)
+	}
+	return nil
+}
 
 func MetricsUnaryServerInterceptor(options map[string]interface{}) grpc.UnaryServerInterceptor {
 	m := options["gx.module"].(*module)
@@ -104,15 +105,15 @@ func MetricsUnaryServerInterceptor(options map[string]interface{}) grpc.UnarySer
 	return prometheus.UnaryServerInterceptor()
 }
 
-// func TracerUnaryServerInterceptor(options map[string]interface{}) grpc.UnaryServerInterceptor {
-// 	host := options["gx.host"].(service.Host)
-// 	tracer := host.Tracer()
-// 	return grpc_ot.UnaryServerInterceptor(grpc_ot.WithTracer(tracer))
-// }
+func TracerUnaryServerInterceptor(options map[string]interface{}) grpc.UnaryServerInterceptor {
+	driver := options["gx.driver"].(service.ModuleDriver)
+	tracer := driver.Tracer()
+	return grpc_ot.UnaryServerInterceptor(grpc_ot.WithTracer(tracer))
+}
 
 func RecoveryUnaryServerInterceptor(options map[string]interface{}) grpc.UnaryServerInterceptor {
-	host := options["gx.host"].(service.Host)
-	logger := host.Logger()
+	driver := options["gx.driver"].(service.ModuleDriver)
+	logger := driver.Logger()
 
 	m := options["gx.module"].(*module)
 	recovery := m.recovery
@@ -187,9 +188,9 @@ func RetryClientInterceptor(options map[string]interface{}) grpc.UnaryClientInte
 	return grpc_retry.UnaryClientInterceptor(callopts...)
 }
 
-// func TracerClientInterceptor(options map[string]interface{}) grpc.UnaryClientInterceptor {
-// 	d := options["gx.dialer"].(*Dialer)
-// 	tracer := d.Tracer
-//
-// 	return grpc_ot.UnaryClientInterceptor(grpc_ot.WithTracer(tracer))
-// }
+func TracerClientInterceptor(options map[string]interface{}) grpc.UnaryClientInterceptor {
+	d := options["gx.dialer"].(*Dialer)
+	tracer := d.Tracer
+
+	return grpc_ot.UnaryClientInterceptor(grpc_ot.WithTracer(tracer))
+}

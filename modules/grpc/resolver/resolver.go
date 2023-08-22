@@ -5,10 +5,9 @@ import (
 	"encoding/json"
 	"sync"
 
-	"google.golang.org/grpc"
-
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.etcd.io/etcd/client/v3/naming/endpoints"
+	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	grpcresolver "google.golang.org/grpc/resolver"
 	"google.golang.org/grpc/status"
@@ -22,7 +21,7 @@ type builder struct {
 func (b builder) Build(target grpcresolver.Target, cc grpcresolver.ClientConn, opts grpcresolver.BuildOptions) (grpcresolver.Resolver, error) {
 	r := &Resolver{
 		c:      b.c,
-		target: target.URL.Path,
+		target: target.URL.Path[1:],
 		cc:     cc,
 	}
 	if b.metaData != nil {
@@ -39,9 +38,10 @@ func (b builder) Build(target grpcresolver.Target, cc grpcresolver.ClientConn, o
 	if err != nil {
 		return nil, status.Errorf(codes.InvalidArgument, "Resolver: failed to new endpoint manager: %s", err)
 	}
+
 	r.wch, err = em.NewWatchChannel(r.ctx)
 	if err != nil {
-		return nil, status.Errorf(codes.Internal, "Resolver: failed to new watch channer: %s", err)
+		return nil, status.Errorf(codes.Internal, "Resolver: failed to new watch channel: %s", err)
 	}
 
 	r.wg.Add(1)
@@ -72,7 +72,6 @@ type Resolver struct {
 
 func (r *Resolver) watch() {
 	defer r.wg.Done()
-
 	allUps := make(map[string]*endpoints.Update)
 	for {
 		select {
@@ -155,7 +154,8 @@ func (r *Resolver) keepAlive(ctx context.Context, target string, addr grpcresolv
 
 // ResolveNow is a no-op here.
 // It's just a hint, Resolver can ignore this if it's not necessary.
-func (r *Resolver) ResolveNow(grpcresolver.ResolveNowOptions) {}
+func (r *Resolver) ResolveNow(grpcresolver.ResolveNowOptions) {
+}
 
 func (r *Resolver) Close() {
 	r.cancel()

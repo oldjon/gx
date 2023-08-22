@@ -3,7 +3,7 @@ package buildinfo
 // code version
 var codeVersion = ""
 
-// resource version
+// resources version
 var resVersion = ""
 
 // build time

@@ -12,40 +12,46 @@ import (
 	"go.uber.org/zap"
 )
 
-type ITcpTask interface {
-	ParseMsg(data []byte)
-	OnClose()
-}
-
 const (
-	cmdMaxSize    = 128 * 1024
-	cmdHeaderSize = 4 // 3字节指令，1字节flag
-	cmdVerifyTime = 30
+	cmdMaxSize    = 512 * 1024
+	cmdVerifyTime = 5
 )
 
-type TCPTask struct {
-	closed      int32
-	verified    bool
-	stoppedChan chan struct{}
-	recvBuff    *bytebuffer.ByteBuffer
-	sendBuff    *bytebuffer.ByteBuffer
-	sendMutex   sync.Mutex
-	sendChan    chan struct{}
-	Conn        net.Conn
-	logger      *zap.Logger
-	Derived     ITcpTask
+type TCPFrame interface {
+	HeaderSize() int
+	Size([]byte) (int, error)
+	EncodeMsg(uint8, uint32, interface{}) ([]byte, error)
+	DecodeMsg([]byte, interface{}) error
 }
 
-func NewTCPTask(conn net.Conn, logger *zap.Logger) *TCPTask {
+type TCPTask struct {
+	closed          int32
+	verified        bool
+	stoppedChan     chan struct{}
+	revBuff         *bytebuffer.ByteBuffer
+	sendBuff        *bytebuffer.ByteBuffer
+	sendMutex       sync.Mutex
+	sendChan        chan struct{}
+	Conn            net.Conn
+	logger          *zap.Logger
+	parseMsgHandler func(data []byte)
+	onCloseHandler  func()
+	frame           TCPFrame
+}
+
+func NewTCPTask(conn net.Conn, logger *zap.Logger, pmHandler func(data []byte), ocHandler func(), f TCPFrame) *TCPTask {
 	return &TCPTask{
-		closed:      -1,
-		verified:    false,
-		Conn:        conn,
-		logger:      logger,
-		stoppedChan: make(chan struct{}, 1),
-		recvBuff:    bytebuffer.NewByteBuffer(),
-		sendBuff:    bytebuffer.NewByteBuffer(),
-		sendChan:    make(chan struct{}, 1),
+		closed:          -1, // -1: initial stat, 0: open, 1: close
+		verified:        false,
+		Conn:            conn,
+		logger:          logger,
+		stoppedChan:     make(chan struct{}, 1),
+		revBuff:         bytebuffer.NewByteBuffer(),
+		sendBuff:        bytebuffer.NewByteBuffer(),
+		sendChan:        make(chan struct{}, 1),
+		parseMsgHandler: pmHandler,
+		onCloseHandler:  ocHandler,
+		frame:           f,
 	}
 }
 
@@ -93,11 +99,8 @@ func (tt *TCPTask) Start() {
 	if !atomic.CompareAndSwapInt32(&tt.closed, -1, 0) {
 		return
 	}
-	job := &sync.WaitGroup{}
-	job.Add(1)
-	go tt.SendLoop(job)
-	go tt.RecvLoop()
-	job.Wait()
+	go tt.SendLoop()
+	go tt.RevLoop()
 	tt.logger.Info("conn received ", zap.String("remote_addr", tt.RemoteAddr()))
 	return
 }
@@ -110,15 +113,13 @@ func (tt *TCPTask) Close() {
 		return
 	}
 	tt.logger.Info("conn closed ", zap.String("remote_addr", tt.RemoteAddr()))
-	tt.Conn.Close()
-	tt.recvBuff.Reset()
+	_ = tt.Conn.Close()
+
+	close(tt.stoppedChan)
+
+	tt.revBuff.Reset()
 	tt.sendBuff.Reset()
-	select {
-	case tt.stoppedChan <- struct{}{}:
-	default:
-		tt.logger.Error("conn close failed ", zap.String("remote_addr", tt.RemoteAddr()))
-	}
-	tt.Derived.OnClose()
+	tt.onCloseHandler()
 	return
 }
 
@@ -149,6 +150,26 @@ func (tt *TCPTask) Terminate() {
 	tt.Close()
 }
 
+func (tt *TCPTask) SendMsg(cmd uint8, subCmd uint32, msg interface{}) bool {
+	if tt.IsClosed() {
+		return false
+	}
+	if tt.frame == nil {
+		return false
+	}
+
+	buffer, err := tt.frame.EncodeMsg(cmd, subCmd, msg)
+	if err != nil {
+		tt.logger.Error("send msg: encode msg failed ", zap.Uint8("cmd", cmd), zap.Uint32("subcmd", subCmd), zap.Error(err))
+		return false
+	}
+	tt.sendMutex.Lock()
+	tt.sendBuff.Append(buffer...)
+	tt.sendMutex.Unlock()
+	tt.SendSignal()
+	return true
+}
+
 func (tt *TCPTask) SendBytes(buffer []byte) bool {
 	if tt.IsClosed() {
 		return false
@@ -167,7 +188,7 @@ func (tt *TCPTask) readAtLeast(buff *bytebuffer.ByteBuffer, needNum int) error {
 	return err
 }
 
-func (tt *TCPTask) RecvLoop() {
+func (tt *TCPTask) RevLoop() {
 	defer func() {
 		tt.Close()
 		if err := recover(); err != nil {
@@ -184,26 +205,37 @@ func (tt *TCPTask) RecvLoop() {
 	)
 
 	for {
-
-		totalSize = tt.recvBuff.ReadSize()
-		if totalSize <= cmdHeaderSize {
-			needNum = cmdHeaderSize - totalSize
-			err = tt.readAtLeast(tt.recvBuff, needNum)
-			if err != nil {
-				tt.logger.Error("conn read data failed ", zap.String("remote_addr", tt.RemoteAddr()), zap.Error(err))
-				return
-			}
-			totalSize = tt.recvBuff.ReadSize()
+		select {
+		case <-tt.stoppedChan:
+			return
+		default:
 		}
 
-		msgBuff = tt.recvBuff.ReadBuf()
+		totalSize = tt.revBuff.ReadSize()
+		headerSize := tt.frame.HeaderSize()
+		if totalSize < headerSize {
+			needNum = headerSize - totalSize
+			err = tt.readAtLeast(tt.revBuff, needNum)
+			if err != nil {
+				tt.logger.Debug("conn read data failed ", zap.String("remote_addr", tt.RemoteAddr()), zap.Error(err))
+				return
+			}
+			totalSize = tt.revBuff.ReadSize()
+		}
 
-		dataSize = (int(msgBuff[0]) << 16) | (int(msgBuff[1]) << 8) | int(msgBuff[2])
+		msgBuff = tt.revBuff.ReadBuf()
+
+		dataSize, err = tt.frame.Size(msgBuff)
+		if err != nil {
+			tt.logger.Error("conn data smaller than min size 4", zap.String("remote_addr", tt.RemoteAddr()),
+				zap.Int("data_size", dataSize))
+			return
+		}
 		if dataSize > cmdMaxSize {
 			tt.logger.Error("conn data larger than max size 128k", zap.String("remote_addr", tt.RemoteAddr()),
 				zap.Int("data_size", dataSize))
 			return
-		} else if dataSize < cmdHeaderSize {
+		} else if dataSize < headerSize {
 			tt.logger.Error("conn data smaller than min size 4", zap.String("remote_addr", tt.RemoteAddr()),
 				zap.Int("data_size", dataSize))
 			return
@@ -211,20 +243,19 @@ func (tt *TCPTask) RecvLoop() {
 
 		if totalSize < dataSize {
 			needNum = dataSize - totalSize
-			err = tt.readAtLeast(tt.recvBuff, needNum)
+			err = tt.readAtLeast(tt.revBuff, needNum)
 			if err != nil {
-				tt.logger.Error("conn read data failed ", zap.String("remote_addr", tt.RemoteAddr()), zap.Error(err))
+				tt.logger.Debug("conn read data failed ", zap.String("remote_addr", tt.RemoteAddr()), zap.Error(err))
 				return
 			}
-			msgBuff = tt.recvBuff.ReadBuf()
+			msgBuff = tt.revBuff.ReadBuf()
 		}
-
-		tt.Derived.ParseMsg(msgBuff[:dataSize])
-		tt.recvBuff.ReadFlip(dataSize)
+		tt.parseMsgHandler(msgBuff[:dataSize])
+		tt.revBuff.ReadFlip(dataSize)
 	}
 }
 
-func (tt *TCPTask) SendLoop(job *sync.WaitGroup) {
+func (tt *TCPTask) SendLoop() {
 	defer func() {
 		tt.Close()
 		if err := recover(); err != nil {
@@ -240,8 +271,6 @@ func (tt *TCPTask) SendLoop(job *sync.WaitGroup) {
 	)
 
 	defer timeout.Stop()
-
-	job.Done()
 
 	for {
 		select {

@@ -3,12 +3,12 @@ package service
 import (
 	"context"
 	"fmt"
+	"github.com/opentracing/opentracing-go"
 	"strings"
 
 	"github.com/oldjon/gutil/env"
-	"github.com/prometheus/client_golang/prometheus"
-
 	"github.com/pkg/errors"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/spf13/viper"
 	"go.uber.org/zap"
 )
@@ -103,10 +103,13 @@ func WithRole(role string) ModuleOption {
 
 type ModuleDriver interface {
 	Host() Host
+	HostName() string
 	ModuleName() string
 	ModuleConfig() env.ModuleConfig
 	Logger() *zap.Logger
+	EventLogger() *EventLogger
 	Metrics() prometheus.Registerer
+	Tracer() opentracing.Tracer
 }
 
 type moduleDriver struct {
@@ -123,6 +126,10 @@ func (md *moduleDriver) Host() Host {
 	return md.host
 }
 
+func (md *moduleDriver) HostName() string {
+	return md.host.Name()
+}
+
 func (md *moduleDriver) ModuleName() string {
 	return md.options.moduleName
 }
@@ -135,8 +142,16 @@ func (md *moduleDriver) Logger() *zap.Logger {
 	return md.host.Logger()
 }
 
+func (md *moduleDriver) EventLogger() *EventLogger {
+	return md.host.EventLogger()
+}
+
 func (md *moduleDriver) Metrics() prometheus.Registerer {
 	return md.host.Metrics()
+}
+
+func (md *moduleDriver) Tracer() opentracing.Tracer {
+	return md.host.Tracer(md.ModuleName())
 }
 
 // @return
@@ -167,7 +182,12 @@ func newModuleDriver(host *host, mi moduleInfo, tlsConfig tlsConfig, forkName st
 		tlsConfig:     tlsConfig,
 		preServeHooks: make([]PreServeHook, 0),
 	}
-	var err error
+
+	err := driver.host.setupModuleTracer(driver.ModuleName()) // before create
+	if err != nil {
+		return nil, false, errors.WithStack(err)
+	}
+
 	driver.module, err = mi.provider.Create(driver)
 	if err != nil {
 		return nil, false, errors.WithStack(err)
@@ -207,6 +227,7 @@ func (md *moduleDriver) preServe(ctx context.Context) error {
 
 func (md *moduleDriver) serve(ctx context.Context) error {
 	err := md.module.Serve(ctx)
+	md.Logger().Error("module driver serve failed", zap.String("module", md.ModuleName()), zap.Error(err))
 	return errors.WithStack(err)
 }
 

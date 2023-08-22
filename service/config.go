@@ -10,7 +10,7 @@ type serviceConfig struct {
 	Description string
 	Owner       string
 	Roles       []string
-	// Tags        map[string]string
+	Tags        map[string]string
 }
 
 type tlsConfig struct {
@@ -91,6 +91,13 @@ func (i *internalVariables) GetString(key string) string {
 
 func (i *internalVariables) IsSet(key string) bool {
 	_, ok := i.variables[key]
-
 	return ok
+}
+
+type tracingConfig struct {
+	Enable   bool
+	Sampler  string
+	Sampling float64
+	Addr     string
+	LogSpans bool `mapstructure:"log_spans"`
 }

@@ -5,7 +5,6 @@ import (
 	"fmt"
 
 	"github.com/oldjon/gx/common"
-
 	"github.com/oldjon/gx/modules/grpc/prometheus"
 	prom "github.com/prometheus/client_golang/prometheus"
 	"go.uber.org/zap"

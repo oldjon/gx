@@ -2,9 +2,8 @@ package tags
 
 import (
 	"encoding/base64"
-	"strings"
-
 	"fmt"
+	"strings"
 
 	"google.golang.org/grpc/metadata"
 )

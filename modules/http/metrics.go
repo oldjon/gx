@@ -8,7 +8,6 @@ import (
 
 	"github.com/oldjon/gx/common"
 	commonPrometheus "github.com/oldjon/gx/common/prometheus"
-
 	"github.com/prometheus/client_golang/prometheus"
 )
 
