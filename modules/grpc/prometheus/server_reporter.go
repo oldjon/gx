@@ -3,7 +3,6 @@ package prometheus
 import (
 	"time"
 
-	legacyproto "github.com/golang/protobuf/proto" //nolint staticcheck todo, drop legacyproto support in future
 	prom "github.com/prometheus/client_golang/prometheus"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -134,16 +133,11 @@ func (r *serverReporter) ReceivedMessage(request interface{}, err error) {
 
 	// try to convert response to proto.Message to check the size
 	msg, ok := request.(proto.Message)
-	if ok {
-		msgSize := proto.Size(msg)
-		r.mid.serverReceiveSizeHistogram.WithLabelValues(string(r.rpcType), r.serviceName, r.methodName, r.mid.serviceName).Observe(float64(msgSize))
-	} else {
-		lmsg, ok := request.(legacyproto.Message)
-		if ok {
-			msgSize := legacyproto.Size(lmsg)
-			r.mid.serverReceiveSizeHistogram.WithLabelValues(string(r.rpcType), r.serviceName, r.methodName, r.mid.serviceName).Observe(float64(msgSize))
-		}
+	if !ok {
+		return
 	}
+	msgSize := proto.Size(msg)
+	r.mid.serverReceiveSizeHistogram.WithLabelValues(string(r.rpcType), r.serviceName, r.methodName, r.mid.serviceName).Observe(float64(msgSize))
 }
 
 // SentMessage called while send response message
@@ -154,16 +148,11 @@ func (r *serverReporter) SentMessage(response interface{}, err error) {
 
 	// try to convert response to proto.Message to check the size
 	msg, ok := response.(proto.Message)
-	if ok {
-		msgSize := proto.Size(msg)
-		r.mid.serverSendSizeHistogram.WithLabelValues(string(r.rpcType), r.serviceName, r.methodName, r.mid.serviceName).Observe(float64(msgSize))
-	} else {
-		lmsg, ok := response.(legacyproto.Message)
-		if ok {
-			msgSize := legacyproto.Size(lmsg)
-			r.mid.serverSendSizeHistogram.WithLabelValues(string(r.rpcType), r.serviceName, r.methodName, r.mid.serviceName).Observe(float64(msgSize))
-		}
+	if !ok {
+		return
 	}
+	msgSize := proto.Size(msg)
+	r.mid.serverSendSizeHistogram.WithLabelValues(string(r.rpcType), r.serviceName, r.methodName, r.mid.serviceName).Observe(float64(msgSize))
 }
 
 func (r *serverReporter) Handled(code codes.Code) {
