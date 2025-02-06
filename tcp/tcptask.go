@@ -28,7 +28,7 @@ type TCPTask struct {
 	closed          int32
 	verified        bool
 	stoppedChan     chan struct{}
-	revBuff         *bytebuffer.ByteBuffer
+	recvBuff        *bytebuffer.ByteBuffer
 	sendBuff        *bytebuffer.ByteBuffer
 	sendMutex       sync.Mutex
 	sendChan        chan struct{}
@@ -46,7 +46,7 @@ func NewTCPTask(conn net.Conn, logger *zap.Logger, pmHandler func(data []byte), 
 		Conn:            conn,
 		logger:          logger,
 		stoppedChan:     make(chan struct{}, 1),
-		revBuff:         bytebuffer.NewByteBuffer(),
+		recvBuff:        bytebuffer.NewByteBuffer(),
 		sendBuff:        bytebuffer.NewByteBuffer(),
 		sendChan:        make(chan struct{}, 1),
 		parseMsgHandler: pmHandler,
@@ -100,7 +100,7 @@ func (tt *TCPTask) Start() {
 		return
 	}
 	go tt.SendLoop()
-	go tt.RevLoop()
+	go tt.RecvLoop()
 	tt.logger.Info("conn received ", zap.String("remote_addr", tt.RemoteAddr()))
 	return
 }
@@ -117,7 +117,7 @@ func (tt *TCPTask) Close() {
 
 	close(tt.stoppedChan)
 
-	tt.revBuff.Reset()
+	tt.recvBuff.Reset()
 	tt.sendBuff.Reset()
 	tt.onCloseHandler()
 	return
@@ -188,7 +188,7 @@ func (tt *TCPTask) readAtLeast(buff *bytebuffer.ByteBuffer, needNum int) error {
 	return err
 }
 
-func (tt *TCPTask) RevLoop() {
+func (tt *TCPTask) RecvLoop() {
 	defer func() {
 		tt.Close()
 		if err := recover(); err != nil {
@@ -211,19 +211,19 @@ func (tt *TCPTask) RevLoop() {
 		default:
 		}
 
-		totalSize = tt.revBuff.ReadSize()
+		totalSize = tt.recvBuff.ReadSize()
 		headerSize := tt.frame.HeaderSize()
 		if totalSize < headerSize {
 			needNum = headerSize - totalSize
-			err = tt.readAtLeast(tt.revBuff, needNum)
+			err = tt.readAtLeast(tt.recvBuff, needNum)
 			if err != nil {
 				tt.logger.Debug("conn read data failed ", zap.String("remote_addr", tt.RemoteAddr()), zap.Error(err))
 				return
 			}
-			totalSize = tt.revBuff.ReadSize()
+			totalSize = tt.recvBuff.ReadSize()
 		}
 
-		msgBuff = tt.revBuff.ReadBuf()
+		msgBuff = tt.recvBuff.ReadBuf()
 
 		dataSize, err = tt.frame.Size(msgBuff)
 		if err != nil {
@@ -243,15 +243,15 @@ func (tt *TCPTask) RevLoop() {
 
 		if totalSize < dataSize {
 			needNum = dataSize - totalSize
-			err = tt.readAtLeast(tt.revBuff, needNum)
+			err = tt.readAtLeast(tt.recvBuff, needNum)
 			if err != nil {
 				tt.logger.Debug("conn read data failed ", zap.String("remote_addr", tt.RemoteAddr()), zap.Error(err))
 				return
 			}
-			msgBuff = tt.revBuff.ReadBuf()
+			msgBuff = tt.recvBuff.ReadBuf()
 		}
 		tt.parseMsgHandler(msgBuff[:dataSize])
-		tt.revBuff.ReadFlip(dataSize)
+		tt.recvBuff.ReadFlip(dataSize)
 	}
 }
 
